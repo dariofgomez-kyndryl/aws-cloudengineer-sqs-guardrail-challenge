@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  LambdaRuntime:
+    Type: String
+    Default: "python3.9"
+    Description: "Runtime for the Lambda function"
+  LambdaMemorySize:
+    Type: Number
+    Default: 128
+    Description: "Memory size for the Lambda function"
+  PermissionBoundaryArn:
+    Type: String
+    Default: ""
+    Description: "ARN of the permission boundary policy"
+  SNSTopicArn:
+    Type: String
+    Default: ""
+    Description: "Optional SNS Topic ARN for alerting"
+  ControlIdentifier:
+    Type: String
+    Description: "Control Tower Control Identifier"
+  TargetIdentifier:
+    Type: String
+    Description: "Target Organizational Unit Identifier"
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "LambdaExecutionRole-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com]
+            Action: [sts:AssumeRole]
+      ManagedPolicyArns:
+        - !Ref PermissionBoundaryArn
+      Policies:
+        - PolicyName: LambdaSQSGuardrailPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - sqs:ListQueues
+                  - sqs:GetQueueAttributes
+                  - sqs:ListQueueTags
+                Resource: "*"
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SNSTopicArn
+                Condition:
+                  StringNotEqualsIfExists:
+                    "sns:Publish": ""
+
+  SQSGuardrailLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "SQSGuardrailLambda-${AWS::StackName}"
+      Handler: "lambda_function.lambda_handler"
+      Runtime: !Ref LambdaRuntime
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: !Ref LambdaMemorySize
+      Timeout: 10
+      Code:
+        S3Bucket: "source-code-bucket"
+        S3Key: "lambda_function.zip"
+
+  SQSGuardrailEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "SQSGuardrailEventRule-${AWS::StackName}"
+      EventPattern:
+        source:
+          - "aws.sqs"
+        detail-type:
+          - "AWS API Call via CloudTrail"
+        detail:
+          eventSource:
+            - "sqs.amazonaws.com"
+          eventName:
+            - "CreateQueue"
+      Targets:
+        - Arn: !GetAtt SQSGuardrailLambda.Arn
+          Id: "TargetLambda"
+
+  EventBridgePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref SQSGuardrailLambda
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt SQSGuardrailEventRule.Arn
+
+  ControlTowerGuardrail:
+    Type: AWS::ControlTower::EnabledControl
+    Properties:
+      ControlIdentifier: !Ref ControlIdentifier
+      TargetIdentifier: !Ref TargetIdentifier
+
+Outputs:
+  LambdaFunctionArn:
+    Value: !GetAtt SQSGuardrailLambda.Arn
+  IAMRoleArn:
+    Value: !GetAtt LambdaExecutionRole.Arn
